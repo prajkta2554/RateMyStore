@@ -1,1 +1,591 @@
+// backend/config/db.js
+const { Sequelize } = require('sequelize');
+require('dotenv').config();
+
+const sequelize = new Sequelize(
+  process.env.DB_NAME,       // database name
+  process.env.DB_USER,       // user
+  process.env.DB_PASS,       // password
+  {
+    host: process.env.DB_HOST || 'localhost',
+    dialect: 'mysql',
+    logging: false,          // disable SQL logging, optional
+  }
+);
+
+const testConnection = async () => {
+  try {
+    await sequelize.authenticate();
+    console.log(' Database connected...');
+  } catch (error) {
+    console.error(' Unable to connect to the database:', error);
+  }
+};
+
+testConnection();
+
+module.exports = sequelize;
+
+
+// backend/controllers/adminController.js
+const { User, Store, Rating } = require('../models');
+const { Op } = require('sequelize');
+
+// 1. Dashboard Summary
+const getDashboardSummary = async (req, res) => {
+  try {
+    const totalUsers = await User.count();
+    const totalStores = await Store.count();
+    const totalRatings = await Rating.count();
+
+    return res.json({
+      totalUsers,
+      totalStores,
+      totalRatings,
+    });
+  } catch (error) {
+    console.error('Dashboard Error:', error);
+    return res.status(500).json({ message: 'Server Error' });
+  }
+};
+
+// 2. List Users with Filters
+const listUsers = async (req, res) => {
+  try {
+    const { name, email, address, role } = req.query;
+
+    const where = {};
+
+    if (name) {
+      where.name = { [Op.iLike]: `%${name}%` };
+    }
+
+    if (email) {
+      where.email = { [Op.iLike]: `%${email}%` };
+    }
+
+    if (address) {
+      where.address = { [Op.iLike]: `%${address}%` };
+    }
+
+    if (role) {
+      where.role = role;
+    }
+
+    const users = await User.findAll({
+      where,
+      attributes: ['id', 'name', 'email', 'address', 'role'],
+    });
+
+    return res.json(users);
+  } catch (error) {
+    console.error('List Users Error:', error);
+    return res.status(500).json({ message: 'Server Error' });
+  }
+};
+
+module.exports = {
+  getDashboardSummary,
+  listUsers,
+};
+
+// backend/controllers/authController.js
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const { User } = require('../models');
+
+const loginUser = async (req, res) => {
+  const { email, password } = req.body;
+
+  try {
+    // Find user by email
+    const user = await User.findOne({ where: { email } });
+    if (!user) {
+      return res.status(400).json({ message: 'Invalid credentials' });
+    }
+
+    // Compare passwords
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) {
+      return res.status(400).json({ message: 'Invalid credentials' });
+    }
+
+    // Create JWT token
+    const token = jwt.sign(
+      { id: user.id, role: user.role, email: user.email },
+      process.env.JWT_SECRET,
+      { expiresIn: '1d' }
+    );
+
+    // Return token and user info
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+      },
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+module.exports = { loginUser };
+
+// backend/controllers/storeController.js
+
+
+// backend/controllers/userController.js
+const { User } = require('../models');
+const bcrypt = require('bcryptjs');
+
+const registerUser = async (req, res) => {
+  try {
+    const { name, email, password, address } = req.body;
+
+    const userExists = await User.findOne({ where: { email } });
+    if (userExists) return res.status(400).json({ message: 'User already exists' });
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    const user = await User.create({
+      name,
+      email,
+      password: hashedPassword,
+      address,
+      role: 'user',
+    });
+
+    res.status(201).json({
+      message: 'User registered',
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        address: user.address,
+        role: user.role,
+      },
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+module.exports = { registerUser };
+
+// backend/middleware/authMiddleware.js
+const jwt = require('jsonwebtoken');
+const { User } = require('../models');
+
+const authenticate = async (req, res, next) => {
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader || !authHeader.startsWith('Bearer '))
+    return res.status(401).json({ message: 'No token provided' });
+
+  const token = authHeader.split(' ')[1];
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await User.findByPk(decoded.id);
+
+    if (!user) return res.status(401).json({ message: 'User not found' });
+
+    req.user = user;
+    next();
+  } catch (err) {
+    return res.status(401).json({ message: 'Invalid token' });
+  }
+};
+
+const authorizeRole = (role) => (req, res, next) => {
+  if (req.user.role !== role)
+    return res.status(403).json({ message: 'Access denied' });
+  next();
+};
+
+module.exports = { authenticate, authorizeRole };
+
+// backend/middleware/roleMiddleware.js
+// middleware/roleMiddleware.js
+
+function isAdmin(req, res, next) {
+  if (req.user && req.user.role === 'admin') return next();
+  return res.status(403).json({ message: 'Access denied. Admins only.' });
+}
+
+function isStoreOwner(req, res, next) {
+  if (req.user && req.user.role === 'store_owner') return next();
+  return res.status(403).json({ message: 'Access denied. Store Owners only.' });
+}
+
+function isUser(req, res, next) {
+  if (req.user && req.user.role === 'user') return next();
+  return res.status(403).json({ message: 'Access denied. Users only.' });
+}
+
+module.exports = { isAdmin, isStoreOwner, isUser };
+
+
+// backend/models/index.js
+// model/index.js
+const { Sequelize, DataTypes } = require('sequelize');
+require('dotenv').config();
+
+const sequelize = new Sequelize(
+  process.env.DB_NAME,
+  process.env.DB_USER,
+  process.env.DB_PASSWORD,
+  {
+    host: process.env.DB_HOST,
+    dialect: process.env.DB_DIALECT, // <- Important!
+  }
+);
+
+//model/Rating.js
+const { DataTypes } = require('sequelize');
+
+module.exports = (sequelize) => {
+  const Rating = sequelize.define('Rating', {
+    id: {
+      type: DataTypes.INTEGER,
+      primaryKey: true,
+      autoIncrement: true,
+    },
+    user_id: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+    },
+    store_id: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+    },
+    rating: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+      validate: {
+        min: 1,
+        max: 5,
+      },
+    },
+  }, {
+    tableName: 'ratings',
+    timestamps: true,
+    underscored: true,
+  });
+
+  return Rating;
+};
+
+//model/Store.js
+const { DataTypes } = require('sequelize');
+
+module.exports = (sequelize) => {
+  const Store = sequelize.define('Store', {
+    id: {
+      type: DataTypes.INTEGER,
+      primaryKey: true,
+      autoIncrement: true,
+    },
+    name: {
+      type: DataTypes.STRING(60),
+      allowNull: false,
+      validate: {
+        len: [1, 60],  // Store name max 60 chars
+      },
+    },
+    email: {
+      type: DataTypes.STRING,
+      allowNull: false,
+      unique: true,
+      validate: {
+        isEmail: true,
+      },
+    },
+    address: {
+      type: DataTypes.STRING(400),
+      allowNull: true,
+      validate: {
+        len: [0, 400],
+      },
+    },
+    owner_id: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+    },
+  }, {
+    tableName: 'stores',
+    timestamps: true,
+    underscored: true,
+  });
+
+  return Store;
+};
+
+//model/User.js
+module.exports = (sequelize, DataTypes) => {
+  const User = sequelize.define('User', {
+    name: {
+      type: DataTypes.STRING,
+      allowNull: false,
+    },
+    email: {
+      type: DataTypes.STRING,
+      unique: true,
+      allowNull: false,
+    },
+    address: {
+      type: DataTypes.STRING,
+    },
+    password: {
+      type: DataTypes.STRING,
+      allowNull: false,
+    },
+    role: {
+      type: DataTypes.ENUM('admin', 'user', 'owner'),
+      defaultValue: 'user',
+    }
+  });
+
+  return User;
+};
+
+// backend/routes/admin.js
+//routes/admin.js
+const express = require('express');
+const router = express.Router();
+
+const {
+  getDashboardSummary,
+  listUsers,
+} = require('../controllers/adminController');
+
+const { authenticate, authorizeRole } = require('../middleware/authMiddleware');
+
+// All admin routes are protected
+router.use(authenticate);
+router.use(authorizeRole('admin')); // Only admin can access
+
+// GET /admin/dashboard – Dashboard summary
+router.get('/dashboard', getDashboardSummary);
+
+// GET /admin/users – List users with filters
+router.get('/users', listUsers);
+
+module.exports = router;
+
+//routes/auth.js
+const express = require('express');
+const router = express.Router();
+const { loginUser } = require('../controllers/authController');
+const { validateLogin } = require('../utils/validation');  // your validation middleware
+const { validationResult } = require('express-validator');
+
+router.post('/login', validateLogin, (req, res, next) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+  next();
+}, loginUser);
+
+module.exports = router;
+
+//routes/authRoutes.js
+const express = require('express');
+const router = express.Router();
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
+
+const { User } = require('../models');
+
+const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret_here';
+
+// Register
+router.post('/register', async (req, res) => {
+  const { name, email, address, password, role } = req.body;
+  if (!name || !email || !password) {
+    return res.status(400).json({ error: 'Name, email, and password are required' });
+  }
+  try {
+    const existingUser = await User.findOne({ where: { email } });
+    if (existingUser) {
+      return res.status(400).json({ error: 'User with this email already exists' });
+    }
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    const user = await User.create({
+      name,
+      email,
+      address,
+      password: hashedPassword,
+      role: role || 'user', // default role is normal user
+    });
+
+    const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '1d' });
+
+    res.status(201).json({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role } });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Login
+router.post('/login', async (req, res) => {
+  const { email, password } = req.body;
+  try {
+    const user = await User.findOne({ where: { email } });
+    if (!user) {
+      return res.status(400).json({ error: 'Invalid email or password' });
+    }
+    const passwordMatch = await bcrypt.compare(password, user.password);
+    if (!passwordMatch) {
+      return res.status(400).json({ error: 'Invalid email or password' });
+    }
+    const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '1d' });
+
+    res.json({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role } });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+module.exports = router;
+
+//routes/storeRoutes
+const { Store } = require('../models');
+
+// Add a new store
+const addStore = async (req, res) => {
+  try {
+    const { name, email, address } = req.body;
+
+    const newStore = await Store.create({ name, email, address });
+
+    res.status(201).json({ message: 'Store added successfully', store: newStore });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// Get all stores
+const getStores = async (req, res) => {
+  try {
+    const stores = await Store.findAll();
+    res.json(stores);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// Get store by ID
+const getStoreById = async (req, res) => {
+  try {
+    const store = await Store.findByPk(req.params.id);
+
+    if (!store) return res.status(404).json({ message: 'Store not found' });
+
+    res.json(store);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// Update a store
+const updateStore = async (req, res) => {
+  try {
+    const store = await Store.findByPk(req.params.id);
+
+    if (!store) return res.status(404).json({ message: 'Store not found' });
+
+    const { name, email, address } = req.body;
+
+    await store.update({ name, email, address });
+
+    res.json({ message: 'Store updated successfully', store });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// Delete a store
+const deleteStore = async (req, res) => {
+  try {
+    const store = await Store.findByPk(req.params.id);
+
+    if (!store) return res.status(404).json({ message: 'Store not found' });
+
+    await store.destroy();
+
+    res.json({ message: 'Store deleted successfully' });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+module.exports = {
+  addStore,
+  getStores,
+  getStoreById,
+  updateStore,
+  deleteStore,
+};
+
+//routes/userRoutes.js
+const express = require('express');
+const router = express.Router();
+const { registerUser } = require('../controllers/userController');
+const { validateSignup } = require('../utils/validation');
+const { validationResult } = require('express-validator');
+
+router.post('/register', validateSignup, (req, res, next) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array() });
+  }
+  next();
+}, registerUser);
+
+module.exports = router;
+
+//backend/utils/validation.js
+//utils/validation.js
+
+// utils/validation.js
+const { body } = require('express-validator');
+
+const passwordRegex = /^(?=.*[A-Z])(?=.*[!@#$%^&*]).{8,16}$/;
+
+const validateSignup = [
+  body('name')
+    .isLength({ min: 2, max: 60 })
+    .withMessage('Name must be 2-60 characters long'),
+  body('email').isEmail().withMessage('Invalid email address'),
+  body('address')
+    .isLength({ max: 400 })
+    .withMessage('Address max length is 400 characters'),
+  body('password')
+    .matches(passwordRegex)
+    .withMessage('Password must be 8-16 chars, include uppercase & special char'),
+];
+
+const validateLogin = [
+  body('email').isEmail().withMessage('Invalid email'),
+  body('password').notEmpty().withMessage('Password required'),
+];
+
+module.exports = { validateSignup, validateLogin };
+
+
+
+
 
